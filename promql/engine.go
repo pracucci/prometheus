@@ -1853,15 +1853,6 @@ func getPointSlice(sz int) []Point {
 	return make([]Point, 0, sz)
 }
 
-func getPointSliceWithMinCapacityGuaranteed(minCapacity int) []Point {
-	p := getPointSlice(minCapacity)
-	if cap(p) >= minCapacity {
-		return p
-	}
-
-	return make([]Point, 0, minCapacity)
-}
-
 func putPointSlice(p []Point) {
 	//nolint:staticcheck // Ignore SA6002 relax staticcheck verification.
 	pointPool.Put(p[:0])
