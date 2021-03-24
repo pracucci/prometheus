@@ -1131,8 +1131,21 @@ func (ev *evaluator) rangeEval(prepSeries func(labels.Labels, *EvalSeriesHelper)
 	return mat, warnings
 }
 
+type group struct {
+	metric labels.Labels
+	points []groupPoints
+}
+
+type groupPoints struct {
+	// Timestamp.
+	ts int64
+
+	// Accumulators used by aggregation.
+	value float64
+}
+
 // TODO in this experiment, the checking of ev.currentSamples is currently skipped (but easy to do).
-func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...parser.Expr) (Matrix, storage.Warnings) {
+func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string, without bool, exprs ...parser.Expr) (Matrix, storage.Warnings) {
 	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
 	matrixes := make([]Matrix, len(exprs))
 	originalNumSamples := ev.currentSamples
@@ -1145,17 +1158,13 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 			val, ws := ev.eval(e)
 			warnings = append(warnings, ws...)
 			matrixes[i] = val.(Matrix)
-
-			// Keep a copy of the original point slices so that they
-			// can be returned to the pool.
-			origMatrixes[i] = make(Matrix, len(matrixes[i]))
-			copy(origMatrixes[i], matrixes[i])
 		}
 	}
 
 	vectors := make([]Vector, len(exprs)) // Input vectors for the function.
 	// Create an output vector that is as big as the input matrix with
 	// the most time series.
+	// TODO can be simplified. We expect only 1 expression.
 	biggestLen := 1
 	for i := range exprs {
 		vectors[i] = make(Vector, 0, len(matrixes[i]))
@@ -1163,7 +1172,7 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 			biggestLen = len(matrixes[i])
 		}
 	}
-	outSeriess := make(map[uint64]Series, biggestLen) // Output series by series hash.
+	outSeriess := make(map[uint64]group, biggestLen) // Output series by series hash.
 
 	// The aggregation expects only 1 expression.
 	if len(exprs) != 1 {
@@ -1205,57 +1214,52 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 			}
 
 			// Initialize output points.
-			points := getPointSliceWithMinCapacityGuaranteed(numSteps)
-			points = points[0:numSteps]
+			// TODO define a custom pool for this.
+			points := make([]groupPoints, numSteps)
 			idx := 0
 
 			for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval {
-				points[idx].T = ts
+				points[idx].ts = ts
 
 				// Initialize to NaN to be able to find out which points have not been
 				// used at all at the end of the series iteration.
-				points[idx].V = math.NaN()
+				points[idx].value = math.NaN()
 				idx++
 			}
 
-			out = Series{
-				Metric: groupingMetric,
-				Points: points,
+			out = group{
+				metric: groupingMetric,
+				points: points,
 			}
-			seriess[groupingKey] = out
+			outSeriess[groupingKey] = out
 		}
 
-		// Sum the series points to the resulting output series.
+		// Run the aggregation.
 		outIdx := 0
 		for _, point := range series.Points {
 			// Advance the output index until we hit the point with the same timestamp.
-			for out.Points[outIdx].T != point.T {
+			// TODO protect from out of bound (if hit, we need to error out)
+			for out.points[outIdx].ts != point.T {
 				outIdx++
 			}
 
-			// Sum aggregation.
-			if math.IsNaN(out.Points[outIdx].V) {
-				out.Points[outIdx].V = point.V
-			} else {
-				out.Points[outIdx].V += point.V
+			switch op {
+			case parser.SUM:
+				if math.IsNaN(out.points[outIdx].value) {
+					out.points[outIdx].value = point.V
+				} else {
+					out.points[outIdx].value += point.V
+				}
+			case parser.MIN:
+				if out.points[outIdx].value > point.V || math.IsNaN(out.points[outIdx].value) {
+					out.points[outIdx].value = point.V
+				}
+			case parser.MAX:
+				if out.points[outIdx].value < point.V || math.IsNaN(out.points[outIdx].value) {
+					out.points[outIdx].value = point.V
+				}
 			}
 		}
-	}
-
-	// Filter out NaN points.
-	for idx, outSeries := range outSeriess {
-		filtered := getPointSlice(len(outSeries.Points))
-		for _, point := range outSeries.Points {
-			if !math.IsNaN(point.V) {
-				filtered = append(filtered, point)
-			}
-		}
-
-		// We can now release the original points slice.
-		putPointSlice(outSeries.Points)
-
-		outSeries.Points = filtered
-		outSeriess[idx] = outSeries
 	}
 
 	// Reuse the original point slices.
@@ -1268,7 +1272,24 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 	// Assemble the output matrix. By the time we get here we know we don't have too many samples.
 	mat := make(Matrix, 0, len(outSeriess))
 	for _, ss := range outSeriess {
-		mat = append(mat, ss)
+		points := getPointSlice(len(ss.points))
+
+		for _, point := range ss.points {
+			// Filter out NaN points.
+			if math.IsNaN(point.value) {
+				continue
+			}
+
+			points = append(points, Point{
+				T: point.ts,
+				V: point.value,
+			})
+		}
+
+		mat = append(mat, Series{
+			Metric: ss.metric,
+			Points: points,
+		})
 	}
 	ev.currentSamples = originalNumSamples + mat.TotalSamples()
 	return mat, warnings
@@ -1328,8 +1349,8 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 		}
 
 		// Experiment to optimize the SUM aggregation.
-		if e.Op == parser.SUM {
-			return ev.rangeEvalSum(sortedGrouping, e.Without, e.Expr)
+		if e.Op == parser.SUM || e.Op == parser.MIN || e.Op == parser.MAX {
+			return ev.rangeEvalAggregation(e.Op, sortedGrouping, e.Without, e.Expr)
 		}
 
 		unwrapParenExpr(&e.Param)
