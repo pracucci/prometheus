@@ -1135,7 +1135,6 @@ func (ev *evaluator) rangeEval(prepSeries func(labels.Labels, *EvalSeriesHelper)
 func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...parser.Expr) (Matrix, storage.Warnings) {
 	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
 	matrixes := make([]Matrix, len(exprs))
-	origMatrixes := make([]Matrix, len(exprs))
 	originalNumSamples := ev.currentSamples
 
 	var warnings storage.Warnings
@@ -1245,10 +1244,6 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 
 	// Filter out NaN points.
 	for idx, outSeries := range outSeriess {
-		// TODO in case of a bunch of churning, this is inefficient because we request a slice
-		// 		with a bunch of points but then we'll filter out most of them. What if we count
-		// 		the number of points we need first?
-
 		filtered := getPointSlice(len(outSeries.Points))
 		for _, point := range outSeries.Points {
 			if !math.IsNaN(point.V) {
@@ -1264,11 +1259,12 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 	}
 
 	// Reuse the original point slices.
-	for _, m := range origMatrixes {
+	for _, m := range matrixes {
 		for _, s := range m {
 			putPointSlice(s.Points)
 		}
 	}
+
 	// Assemble the output matrix. By the time we get here we know we don't have too many samples.
 	mat := make(Matrix, 0, len(outSeriess))
 	for _, ss := range outSeriess {
