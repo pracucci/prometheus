@@ -1142,6 +1142,8 @@ type groupPoints struct {
 
 	// Accumulators used by aggregation.
 	value float64
+	mean  float64
+	count int
 }
 
 // TODO in this experiment, the checking of ev.currentSamples is currently skipped (but easy to do).
@@ -1258,6 +1260,17 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 				if out.points[outIdx].value < point.V || math.IsNaN(out.points[outIdx].value) {
 					out.points[outIdx].value = point.V
 				}
+			case parser.STDVAR, parser.STDDEV:
+				if math.IsNaN(out.points[outIdx].value) {
+					out.points[outIdx].value = 0
+					out.points[outIdx].mean = point.V
+					out.points[outIdx].count = 1
+				} else {
+					out.points[outIdx].count++
+					delta := point.V - out.points[outIdx].mean
+					out.points[outIdx].mean += delta / float64(out.points[outIdx].count)
+					out.points[outIdx].value += delta * (point.V - out.points[outIdx].mean)
+				}
 			}
 		}
 	}
@@ -1280,10 +1293,21 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 				continue
 			}
 
-			points = append(points, Point{
-				T: point.ts,
-				V: point.value,
-			})
+			// Compute the final point value.
+			result := Point{T: point.ts}
+
+			switch op {
+			case parser.STDVAR:
+				result.V = point.value / float64(point.count)
+
+			case parser.STDDEV:
+				result.V = math.Sqrt(point.value / float64(point.count))
+
+			default:
+				result.V = point.value
+			}
+
+			points = append(points, result)
 		}
 
 		mat = append(mat, Series{
@@ -1349,7 +1373,7 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 		}
 
 		// Experiment to optimize the SUM aggregation.
-		if e.Op == parser.SUM || e.Op == parser.MIN || e.Op == parser.MAX {
+		if e.Op == parser.SUM || e.Op == parser.MIN || e.Op == parser.MAX || e.Op == parser.STDDEV || e.Op == parser.STDVAR {
 			return ev.rangeEvalAggregation(e.Op, sortedGrouping, e.Without, e.Expr)
 		}
 
