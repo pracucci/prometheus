@@ -1164,7 +1164,7 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 			biggestLen = len(matrixes[i])
 		}
 	}
-	seriess := make(map[uint64]Series, biggestLen) // Output series by series hash.
+	outSeriess := make(map[uint64]Series, biggestLen) // Output series by series hash.
 
 	// The aggregation expects only 1 expression.
 	if len(exprs) != 1 {
@@ -1181,7 +1181,7 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 		var groupingKey uint64
 		groupingKey, buf = generateGroupingKey(series.Metric, grouping, without, buf)
 
-		out, ok := seriess[groupingKey]
+		out, ok := outSeriess[groupingKey]
 
 		// Initialise a new resulting series.
 		if !ok {
@@ -1206,10 +1206,8 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 			}
 
 			// Initialize output points.
-			// TODO use getPointSlice() and then grow it if cap() is not enough.
-			// points := getPointSlice(numSteps)
-			// points = points[0:numSteps]
-			points := make([]Point, numSteps)
+			points := getPointSliceWithMinCapacityGuaranteed(numSteps)
+			points = points[0:numSteps]
 			idx := 0
 
 			for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval {
@@ -1246,14 +1244,23 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 	}
 
 	// Filter out NaN points.
-	for _, series := range seriess {
-		filtered := getPointSlice(len(series.Points))
-		for _, point := range series.Points {
+	for idx, outSeries := range outSeriess {
+		// TODO in case of a bunch of churning, this is inefficient because we request a slice
+		// 		with a bunch of points but then we'll filter out most of them. What if we count
+		// 		the number of points we need first?
+
+		filtered := getPointSlice(len(outSeries.Points))
+		for _, point := range outSeries.Points {
 			if !math.IsNaN(point.V) {
 				filtered = append(filtered, point)
 			}
 		}
-		series.Points = filtered
+
+		// We can now release the original points slice.
+		putPointSlice(outSeries.Points)
+
+		outSeries.Points = filtered
+		outSeriess[idx] = outSeries
 	}
 
 	// Reuse the original point slices.
@@ -1263,8 +1270,8 @@ func (ev *evaluator) rangeEvalSum(grouping []string, without bool, exprs ...pars
 		}
 	}
 	// Assemble the output matrix. By the time we get here we know we don't have too many samples.
-	mat := make(Matrix, 0, len(seriess))
-	for _, ss := range seriess {
+	mat := make(Matrix, 0, len(outSeriess))
+	for _, ss := range outSeriess {
 		mat = append(mat, ss)
 	}
 	ev.currentSamples = originalNumSamples + mat.TotalSamples()
@@ -1803,6 +1810,15 @@ func getPointSlice(sz int) []Point {
 		return p.([]Point)
 	}
 	return make([]Point, 0, sz)
+}
+
+func getPointSliceWithMinCapacityGuaranteed(minCapacity int) []Point {
+	p := getPointSlice(minCapacity)
+	if cap(p) >= minCapacity {
+		return p
+	}
+
+	return make([]Point, 0, minCapacity)
 }
 
 func putPointSlice(p []Point) {
