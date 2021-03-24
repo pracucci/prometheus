@@ -62,7 +62,26 @@ func BenchmarkRangeQuery(b *testing.B) {
 		}
 		metrics = append(metrics, labels.FromStrings("__name__", "h_hundred", "l", strconv.Itoa(i), "le", "+Inf"))
 	}
+
+	for i := 0; i < 100; i++ {
+		metrics = append(metrics, labels.FromStrings("__name__", "a_churning", "l", strconv.Itoa(i)))
+		metrics = append(metrics, labels.FromStrings("__name__", "b_churning", "l", strconv.Itoa(i)))
+		for j := 0; j < 10; j++ {
+			metrics = append(metrics, labels.FromStrings("__name__", "h_churning", "l", strconv.Itoa(i), "le", strconv.Itoa(j)))
+		}
+		metrics = append(metrics, labels.FromStrings("__name__", "h_churning", "l", strconv.Itoa(i), "le", "+Inf"))
+	}
 	refs := make([]uint64, len(metrics))
+
+	// Count the total number of churning metrics. This could be hardcoded to a fixed number
+	// but counting it looks more future proof (easy to forget to update this number once the
+	// churning metrics change).
+	numChurningMetrics := 0
+	for _, metric := range metrics {
+		if strings.HasSuffix(metric.Get("__name__"), "churning") {
+			numChurningMetrics++
+		}
+	}
 
 	// A day of data plus 10k steps.
 	numIntervals := 8640 + 10000
@@ -70,7 +89,17 @@ func BenchmarkRangeQuery(b *testing.B) {
 	for s := 0; s < numIntervals; s++ {
 		a := storage.Appender(context.Background())
 		ts := int64(s * 10000) // 10s interval.
+		churningIdx := 0
+
 		for i, metric := range metrics {
+			// Churning series simulates a particularly bad scenario: only 1 series (each time different) with a sample
+			// for each interval.
+			if strings.HasSuffix(metric.Get("__name__"), "churning") {
+				if churningIdx++; s%numChurningMetrics != churningIdx {
+					continue
+				}
+			}
+
 			ref, _ := a.Append(refs[i], metric, ts, float64(s))
 			refs[i] = ref
 		}
@@ -183,6 +212,7 @@ func BenchmarkRangeQuery(b *testing.B) {
 			tmp = append(tmp, benchCase{expr: strings.Replace(c.expr, "X", "one", -1), steps: c.steps})
 			tmp = append(tmp, benchCase{expr: strings.Replace(c.expr, "X", "ten", -1), steps: c.steps})
 			tmp = append(tmp, benchCase{expr: strings.Replace(c.expr, "X", "hundred", -1), steps: c.steps})
+			tmp = append(tmp, benchCase{expr: strings.Replace(c.expr, "X", "churning", -1), steps: c.steps})
 		}
 	}
 	cases = tmp
