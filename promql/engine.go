@@ -1137,9 +1137,6 @@ type group struct {
 }
 
 type groupPoints struct {
-	// Timestamp.
-	ts int64
-
 	// Accumulators used by aggregation.
 	value float64
 	mean  float64
@@ -1181,6 +1178,15 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 		ev.error(fmt.Errorf("unexpected number of expressions (actual: %d)", len(exprs)))
 	}
 
+	// The timestamps of each resulting series points are always the exact same for every series so,
+	// instead of keeping it in-memory for each series, we only keep 1 global slice shared across
+	// all series.
+	pointsTimestamp := make([]int64, numSteps)
+	for idx, ts := 0, ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval {
+		pointsTimestamp[idx] = ts
+		idx++
+	}
+
 	lb := labels.NewBuilder(nil)
 	var buf []byte
 
@@ -1218,15 +1224,10 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 			// Initialize output points.
 			// TODO define a custom pool for this.
 			points := make([]groupPoints, numSteps)
-			idx := 0
-
-			for ts := ev.startTimestamp; ts <= ev.endTimestamp; ts += ev.interval {
-				points[idx].ts = ts
-
+			for idx := 0; idx < numSteps; idx++ {
 				// Initialize to NaN to be able to find out which points have not been
 				// used at all at the end of the series iteration.
 				points[idx].value = math.NaN()
-				idx++
 			}
 
 			out = group{
@@ -1241,7 +1242,7 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 		for _, point := range series.Points {
 			// Advance the output index until we hit the point with the same timestamp.
 			// TODO protect from out of bound (if hit, we need to error out)
-			for out.points[outIdx].ts != point.T {
+			for pointsTimestamp[outIdx] != point.T {
 				outIdx++
 			}
 
@@ -1287,14 +1288,14 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 	for _, ss := range outSeriess {
 		points := getPointSlice(len(ss.points))
 
-		for _, point := range ss.points {
+		for idx, point := range ss.points {
 			// Filter out NaN points.
 			if math.IsNaN(point.value) {
 				continue
 			}
 
 			// Compute the final point value.
-			result := Point{T: point.ts}
+			result := Point{T: pointsTimestamp[idx]}
 
 			switch op {
 			case parser.STDVAR:
