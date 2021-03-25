@@ -1141,6 +1141,9 @@ type groupPoints struct {
 	value float64
 	mean  float64
 	count int
+
+	// Whether this point has even been used.
+	used bool
 }
 
 // TODO in this experiment, the checking of ev.currentSamples is currently skipped (but easy to do).
@@ -1246,23 +1249,26 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 				outIdx++
 			}
 
+			first := !out.points[outIdx].used
+			out.points[outIdx].used = true
+
 			switch op {
 			case parser.SUM:
-				if math.IsNaN(out.points[outIdx].value) {
+				if first {
 					out.points[outIdx].value = point.V
 				} else {
 					out.points[outIdx].value += point.V
 				}
 			case parser.MIN:
-				if out.points[outIdx].value > point.V || math.IsNaN(out.points[outIdx].value) {
+				if out.points[outIdx].value > point.V || math.IsNaN(out.points[outIdx].value) || first {
 					out.points[outIdx].value = point.V
 				}
 			case parser.MAX:
-				if out.points[outIdx].value < point.V || math.IsNaN(out.points[outIdx].value) {
+				if out.points[outIdx].value < point.V || math.IsNaN(out.points[outIdx].value) || first {
 					out.points[outIdx].value = point.V
 				}
 			case parser.STDVAR, parser.STDDEV:
-				if math.IsNaN(out.points[outIdx].value) {
+				if first {
 					out.points[outIdx].value = 0
 					out.points[outIdx].mean = point.V
 					out.points[outIdx].count = 1
@@ -1289,8 +1295,8 @@ func (ev *evaluator) rangeEvalAggregation(op parser.ItemType, grouping []string,
 		points := getPointSlice(len(ss.points))
 
 		for idx, point := range ss.points {
-			// Filter out NaN points.
-			if math.IsNaN(point.value) {
+			// Filter out unused points.
+			if !point.used {
 				continue
 			}
 
