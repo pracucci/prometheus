@@ -16,6 +16,7 @@ package labels
 import (
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/grafana/regexp"
@@ -768,7 +769,7 @@ type equalMultiStringMapMatcher struct {
 
 func (m *equalMultiStringMapMatcher) add(s string) {
 	if !m.caseSensitive {
-		s = strings.ToLower(norm.NFKD.String(s))
+		s = toNormalisedLower(s)
 	}
 
 	m.values[s] = struct{}{}
@@ -788,7 +789,7 @@ func (m *equalMultiStringMapMatcher) setMatches() []string {
 
 func (m *equalMultiStringMapMatcher) Matches(s string) bool {
 	if !m.caseSensitive {
-		s = strings.ToLower(norm.NFKD.String(s))
+		s = toNormalisedLower(s)
 	}
 
 	_, ok := m.values[s]
@@ -940,4 +941,51 @@ func hasPrefixCaseInsensitive(s, prefix string) bool {
 
 func hasSuffixCaseInsensitive(s, suffix string) bool {
 	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+// toNormalisedLower normalise the input string using "Unicode Normalization Form D" and then convert
+// it to lower case.
+//
+// This function has been copied from strings.ToLower().
+func toNormalisedLower(s string) string {
+	// Check if the string is all ASCII chars and has any upper case character.
+	isASCII, hasUpper := true, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			isASCII = false
+			break
+		}
+		hasUpper = hasUpper || ('A' <= c && c <= 'Z')
+	}
+
+	// Optimize for ASCII-only strings. In this case we don't have to do any normalization.
+	if isASCII {
+		if !hasUpper {
+			return s
+		}
+		var (
+			b   strings.Builder
+			pos int
+		)
+		b.Grow(len(s))
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+				if pos < i {
+					b.WriteString(s[pos:i])
+				}
+				b.WriteByte(c)
+				pos = i + 1
+			}
+		}
+		if pos < len(s) {
+			b.WriteString(s[pos:])
+		}
+		return b.String()
+	}
+
+	// Normalise and convert to lower.
+	return strings.Map(unicode.ToLower, norm.NFKD.String(s))
 }
